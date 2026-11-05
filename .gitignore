@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+build/
+dist/
+*.spec
+models/
+error_log.txt
+volume_recovery.json

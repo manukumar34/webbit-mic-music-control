@@ -1,0 +1,14 @@
+pycaw
+psutil
+comtypes
+pystray
+pillow
+keyboard
+faster-whisper
+sounddevice
+numpy
+pyperclip
+winrt-runtime
+winrt-Windows.Media.Control
+winrt-Windows.Foundation
+winrt-Windows.Foundation.Collections
