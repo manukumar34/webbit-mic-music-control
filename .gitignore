@@ -6,3 +6,4 @@ dist/
 models/
 error_log.txt
 volume_recovery.json
+settings.json

@@ -1,6 +1,6 @@
 # Mic Music Control
 
-**Talk to your PC without fighting your music.** Mic Music Control lowers (or pauses) Spotify and other media the moment any app starts using your microphone, then fades it back in when you stop. It also has built-in **hold-to-talk dictation**: hold a key, speak, let go, and your words are typed into whatever text box you clicked. Dictation runs **offline on your own PC** using Whisper. Nothing is sent to the cloud.
+**Talk to your PC without fighting your music.** Mic Music Control lowers (or pauses) Spotify and other media the moment any app starts using your microphone, then fades it back in when you stop. It also has built-in **hold-to-talk dictation**: hold a key, speak, let go, and your words are typed into whatever text box you clicked. Dictation runs **offline on your own PC** using Whisper by default, so nothing leaves your computer. On a slower PC you can switch to **Groq cloud** (Whisper large-v3) for faster and more accurate results. That option sends your recorded speech to Groq, so it is off unless you turn it on.
 
 Made for people who dictate prompts to Claude, ChatGPT, or any text box while music is playing.
 
@@ -40,7 +40,17 @@ Double-click the tray icon (or right-click it, then **Settings...**):
 | Wait after mic stops | Pause before the music comes back |
 | Lower or pause | Keep music playing quietly, or pause it fully |
 | Hotkey | Pick a preset or press your own combination |
-| Accuracy / speed | Fastest (tiny), Balanced (base, default), or Most accurate (small, about 480 MB) |
+| Speech engine | **On this PC** (default, private, free) or **Groq cloud** (faster and more accurate on slow PCs) |
+| Local model | Fastest (tiny), Balanced (base, default), or Most accurate (small, about 480 MB) |
+| Cloud model | whisper-large-v3-turbo (fast) or whisper-large-v3 (most accurate) |
+| Groq API key | Paste your key, then click **Test key** |
+
+#### Using Groq cloud dictation
+
+1. Make a free account at [console.groq.com](https://console.groq.com) and create an API key under **API Keys**.
+2. In Settings, choose **Groq cloud**, paste the key, and click **Test key**.
+3. Hold your hotkey and talk as usual. It needs internet. Your recordings are sent to Groq, and your key is stored in plain text in `settings.json`, so don't share that file.
+4. Switch back to **On this PC** any time to work fully offline.
 
 Settings are saved in `%APPDATA%\MicMusicControl\settings.json`.
 
@@ -82,7 +92,7 @@ The exe is created in `dist\`. Keep the `models` folder next to it, or let it do
 
 - **Nothing happens when I talk:** check Windows Settings, Privacy and security, Microphone, and make sure apps can use the microphone.
 - **Dictation text lands in the wrong place:** click into the text box first and keep it focused while you hold the keys.
-- **Dictation is slow:** choose "Fastest" or "Balanced" in Settings. The first sentence after startup can be slower.
+- **Dictation is slow:** switch the speech engine to Groq cloud in Settings, or choose "Fastest" or "Balanced" for the local model. The first sentence after startup can be slower.
 - **The app stopped:** look for `error_log.txt` next to the exe.
 
 Tested on Windows 11. Other Windows versions may work but are untested.

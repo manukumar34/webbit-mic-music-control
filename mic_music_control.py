@@ -1,15 +1,17 @@
 """
-Mic Music Control  -  by Anu Lavanya, Webbit  (MIT license)
+mic_pause_media_v2.py
+Lowers (ducks) or pauses music when ANY app opens the microphone, and brings it
+back afterwards (only what this script changed).
 
-Lowers (ducks) or pauses music when ANY app uses the microphone, and fades it back
-afterwards (only what this script changed). Also has hold-to-talk dictation:
-hold your hotkey, speak, let go, and Whisper (running offline on your PC) types
-the text into the active window.
+Extras:
+  * Tray icon (bottom-right, maybe under the ^ arrow): right-click for options.
+  * Push-to-talk: HOLD the hotkey to dictate (Win+H voice typing), release to stop.
 
-Install:   pip install -r requirements.txt
-Run:       python mic_music_control.py        (shows messages)
-Silent:    pythonw mic_music_control.py
-Settings:  double-click the tray icon
+Install once (Command Prompt):
+    pip install pycaw psutil comtypes pystray pillow keyboard winrt-runtime winrt-Windows.Media.Control winrt-Windows.Foundation winrt-Windows.Foundation.Collections
+
+Test (shows messages):   python mic_pause_media_v2.py
+Silent:                  pythonw mic_pause_media_v2.py
 """
 
 import asyncio
@@ -56,19 +58,40 @@ MIC_KEY = (
 )
 
 state = {"enabled": True, "mode": MODE, "ptt": PTT_ENABLED, "duck": DUCK_LEVEL,
-         "key": PTT_KEY, "model": "base.en", "fade_in": FADE_IN_SECONDS, "resume": RESUME_DELAY, "quit": False, "mic": False}
+         "key": PTT_KEY, "model": "base.en", "engine": "local", "api_key": "",
+         "cloud_model": "whisper-large-v3-turbo", "fade_in": FADE_IN_SECONDS, "resume": RESUME_DELAY, "quit": False, "mic": False}
 
 # Your choices from the tray menu are remembered in this file.
 import json
 import os
 
-SETTINGS_FILE = os.path.join(os.environ.get("APPDATA", "."), "MicMusicControl", "settings.json")
-SAVED_KEYS = ("enabled", "mode", "ptt", "duck", "key", "model", "fade_in", "resume")
+_APPDATA_FILE = os.path.join(os.environ.get("APPDATA", "."), "MicMusicControl", "settings.json")
+_APP_DIR = os.path.dirname(sys.executable if getattr(sys, "frozen", False) else os.path.abspath(__file__))
+
+
+def _pick_settings_file():
+    """Prefer settings.json next to the app (always the same file, however the app was started).
+    If that folder is read-only (e.g. Program Files), use the AppData folder instead."""
+    local = os.path.join(_APP_DIR, "settings.json")
+    try:
+        if os.path.exists(local):
+            return local
+        with open(os.path.join(_APP_DIR, ".write_test"), "w") as t:
+            t.write("x")
+        os.remove(os.path.join(_APP_DIR, ".write_test"))
+        return local
+    except Exception:
+        return _APPDATA_FILE
+
+
+SETTINGS_FILE = _pick_settings_file()
+SAVED_KEYS = ("enabled", "mode", "ptt", "duck", "key", "model", "engine", "api_key", "cloud_model", "fade_in", "resume")
 
 
 def load_settings():
     try:
-        with open(SETTINGS_FILE, encoding="utf-8") as f:
+        path = SETTINGS_FILE if os.path.exists(SETTINGS_FILE) else _APPDATA_FILE   # migrate old settings
+        with open(path, encoding="utf-8") as f:
             data = json.load(f)
         for k in SAVED_KEYS:
             if k in data:
@@ -371,16 +394,68 @@ def stop_recording():
     threading.Thread(target=transcribe_and_paste, args=(audio,), daemon=True).start()
 
 
+GROQ_URL = "https://api.groq.com/openai/v1/audio/transcriptions"
+
+
+def cloud_transcribe(audio):
+    """Send the recording to Groq's hosted Whisper (large-v3) and return the text."""
+    import io
+    import urllib.error
+    import urllib.request
+    import uuid
+    import wave
+    import numpy as np
+
+    key = (state["api_key"] or os.environ.get("GROQ_API_KEY", "")).strip()
+    if not key:
+        raise RuntimeError("No API key. Open Settings and paste your Groq API key.")
+    pcm = (np.clip(audio, -1, 1) * 32767).astype("<i2").tobytes()
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(16000)
+        w.writeframes(pcm)
+    boundary = uuid.uuid4().hex
+    body = b""
+    for name, value in (("model", state["cloud_model"]), ("language", "en"),
+                        ("response_format", "text"), ("temperature", "0")):
+        body += (f'--{boundary}\r\nContent-Disposition: form-data; name="{name}"\r\n\r\n{value}\r\n').encode()
+    body += (f'--{boundary}\r\nContent-Disposition: form-data; name="file"; filename="speech.wav"\r\n'
+             f'Content-Type: audio/wav\r\n\r\n').encode() + buf.getvalue() + f"\r\n--{boundary}--\r\n".encode()
+    req = urllib.request.Request(GROQ_URL, data=body, method="POST", headers={
+        "Authorization": f"Bearer {key}",
+        "Content-Type": f"multipart/form-data; boundary={boundary}",
+        "User-Agent": "MicMusicControl/1.1",
+    })
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            return r.read().decode("utf-8").strip()
+    except urllib.error.HTTPError as e:
+        detail = e.read().decode("utf-8", "ignore")[:200]
+        if e.code == 401:
+            raise RuntimeError("Groq rejected the API key (401). Check it in Settings.")
+        raise RuntimeError(f"Groq error {e.code}: {detail}")
+
+
 def transcribe_and_paste(audio):
     import pyperclip
-    model = load_model()
-    if model is None:
+    cloud = state["engine"] == "cloud"
+    model = None if cloud else load_model()
+    if not cloud and model is None:
         return
     try:
-        segments, _ = model.transcribe(
-            audio, language="en", beam_size=1, vad_filter=True, condition_on_previous_text=False
-        )
-        text = " ".join(s.text.strip() for s in segments).strip()
+        if cloud:
+            try:
+                text = cloud_transcribe(audio)
+            except Exception as e:
+                notify(f"Cloud dictation failed: {e}")
+                raise
+        else:
+            segments, _ = model.transcribe(
+                audio, language="en", beam_size=1, vad_filter=True, condition_on_previous_text=False
+            )
+            text = " ".join(s.text.strip() for s in segments).strip()
         if DEBUG:
             print(f"[dictation] {text!r}")
         if not text:
@@ -619,24 +694,81 @@ def _settings_thread():
         btn = ttk.Button(f, text="Choose my own keys...", command=custom)
         btn.grid(row=8, column=2, **pad)
 
-        ttk.Label(f, text="Accuracy / speed").grid(row=10, column=0, sticky="w", **pad)
+        section("Speech engine", 10)
+        engine = tk.StringVar(value=state["engine"])
+        mnote = ttk.Label(f, text="")
+        mnote.grid(row=15, column=0, columnspan=3, sticky="w", padx=14)
+
+        def pick_engine():
+            state["engine"] = engine.get()
+            save_settings()
+            if engine.get() == "local":
+                mnote.config(text="Loading local model (first use downloads it)...")
+                threading.Thread(target=load_model, daemon=True).start()
+            else:
+                mnote.config(text="Using Groq cloud. Needs internet and an API key.")
+
+        ttk.Radiobutton(f, text="On this PC (private, free)", value="local", variable=engine,
+                        command=pick_engine).grid(row=11, column=0, columnspan=2, sticky="w", **pad)
+        ttk.Radiobutton(f, text="Groq cloud (faster, more accurate)", value="cloud", variable=engine,
+                        command=pick_engine).grid(row=11, column=2, sticky="w", **pad)
+
+        ttk.Label(f, text="Local model").grid(row=12, column=0, sticky="w", **pad)
         models = {"Fastest (tiny)": "tiny.en", "Balanced (base)": "base.en",
                   "Most accurate (small, slower)": "small.en"}
         mcombo = ttk.Combobox(f, values=list(models), width=26, state="readonly")
         mcombo.set({v: k for k, v in models.items()}.get(state["model"], "Balanced (base)"))
-        mcombo.grid(row=10, column=1, **pad)
-        mnote = ttk.Label(f, text="")
-        mnote.grid(row=11, column=0, columnspan=3, sticky="w", padx=14)
+        mcombo.grid(row=12, column=1, **pad)
 
         def pick_model(_=None):
             state["model"] = models[mcombo.get()]
             save_settings()
-            mnote.config(text="Loading model (first use downloads it)...")
-            threading.Thread(target=load_model, daemon=True).start()
+            if engine.get() == "local":
+                mnote.config(text="Loading model (first use downloads it)...")
+                threading.Thread(target=load_model, daemon=True).start()
 
         mcombo.bind("<<ComboboxSelected>>", pick_model)
 
-        ttk.Button(f, text="Close", command=root.destroy).grid(row=12, column=2, sticky="e", padx=14, pady=(14, 4))
+        ttk.Label(f, text="Cloud model").grid(row=13, column=0, sticky="w", **pad)
+        cmodels = {"Fast (whisper-large-v3-turbo)": "whisper-large-v3-turbo",
+                   "Most accurate (whisper-large-v3)": "whisper-large-v3"}
+        ccombo = ttk.Combobox(f, values=list(cmodels), width=26, state="readonly")
+        ccombo.set({v: k for k, v in cmodels.items()}.get(state["cloud_model"], "Fast (whisper-large-v3-turbo)"))
+        ccombo.grid(row=13, column=1, **pad)
+        ccombo.bind("<<ComboboxSelected>>",
+                    lambda _=None: (state.update(cloud_model=cmodels[ccombo.get()]), save_settings()))
+
+        ttk.Label(f, text="Groq API key").grid(row=14, column=0, sticky="w", **pad)
+        keyvar = tk.StringVar(value=state["api_key"])
+        kentry = ttk.Entry(f, textvariable=keyvar, show="*", width=29)
+        kentry.grid(row=14, column=1, **pad)
+
+        def save_key(*_):
+            state["api_key"] = keyvar.get().strip()
+            save_settings()
+
+        keyvar.trace_add("write", save_key)
+
+        def test_key():
+            mnote.config(text="Testing key...")
+
+            def run():
+                import urllib.request
+                try:
+                    req = urllib.request.Request(
+                        "https://api.groq.com/openai/v1/models",
+                        headers={"Authorization": f"Bearer {state['api_key']}", "User-Agent": "MicMusicControl/1.1"})
+                    urllib.request.urlopen(req, timeout=10).read()
+                    msg = "Key works."
+                except Exception as e:
+                    msg = f"Key failed: {e}"
+                root.after(0, lambda: mnote.config(text=msg))
+
+            threading.Thread(target=run, daemon=True).start()
+
+        ttk.Button(f, text="Test key", command=test_key).grid(row=14, column=2, **pad)
+
+        ttk.Button(f, text="Close", command=root.destroy).grid(row=16, column=2, sticky="e", padx=14, pady=(14, 4))
         root.mainloop()
     except Exception as e:
         if DEBUG:
@@ -719,7 +851,8 @@ async def main():
     tray = build_tray()
     tray.run_detached()
     threading.Thread(target=hotkey_loop, daemon=True).start()
-    threading.Thread(target=load_model, daemon=True).start()   # get the speech model ready
+    if state["engine"] == "local":
+        threading.Thread(target=load_model, daemon=True).start()   # get the speech model ready
 
     while not state["quit"]:
         try:
